@@ -3,16 +3,39 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
-from typing import TypedDict, Literal
+from typing import TypedDict, Literal, Optional
+from prompt_manager import PromptManager
+from ab_test_manager import ABTestManager
+from pathlib import Path
 load_dotenv()
 
-llm_openai = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6)
+prompt_manager = PromptManager(prompts_dir=str(Path(__file__).parent / "prompts"))
+ab_test_manager = ABTestManager()
+
+
+#Load the Prompt 
+def load_prompt_with_fallback(agent_name:str, user_id: str):
+    """ Load the prompt with fallback to v1.0.0 if current version is not available"""
+    prompt_version = ab_test_manager.get_prompt_version(agent_name, user_id)
+
+    if prompt_version == "current":
+        try:
+            prompt_data = prompt_manager.load_prompt(agent_name, prompt_version)
+            return prompt_data, prompt_version
+        except ValueError:
+            prompt_version = "v1.0.0"
+            prompt_data = prompt_manager.load_prompt(agent_name, prompt_version)
+            return prompt_data, prompt_version
+    else:
+        prompt_data = prompt_manager.load_prompt(agent_name, prompt_version)
+        return prompt_data, prompt_version
 
 # Define the State
 
 class AgentState(TypedDict):
     ticket: str
     user_id: str
+    user_email: str
     specialist: Literal['billing', 'technical', 'general','escalate']
     routing_confidence: float
     routing_reasoning: str
@@ -20,6 +43,12 @@ class AgentState(TypedDict):
     specialist_used: str
     iteration_count: int
     log_trace: list
+    sanitized_ticket: str
+    prompt_version: str
+    tokens_used: Optional[int]
+    cost: Optional[float]
+    error: Optional[str]
+
 
 class TicketRouting(BaseModel):
     """ Simple Routing Decision """
@@ -43,18 +72,12 @@ class SupervisorAgent:
         self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6).with_structured_output(TicketRouting)
     # Use the cheapest model for this agent
 
-    def route(self, ticket: str) :
+    def route(self, ticket: str, user_id: str) :
         """ Route the ticket to the appropriate specialist """
-        prompt = """
-        You are a supervisor agent. You are responsible for routing the ticket to the appropriate specialist.
-        Routing rules:
-        - Billing: refunds, payments, invoices, billing issues, charges, subscriptions, billing questions, billing support, billing assistance, billing help, billing information, billing FAQ, billing support, billing assistance, billing help, billing information, billing FAQ, billing support, billing assistance, billing help, billing information, billing FAQ
-        - Technical: bugs, errors, crashes, performance issues, security issues, technical questions, technical support, technical assistance, technical help, technical information, technical FAQ, technical support, technical assistance, technical help, technical information, technical FAQ, technical support, technical assistance, technical help, technical information, technical FAQ
-        - General: general questions, general support, general assistance, general help, general information, general FAQ, general support, general assistance, general help, general information, general FAQ
-        - Escalate: legal issues, ethical issues, security issues, privacy issues, data issues, compliance issues, regulatory issues, legal questions, ethical questions, security questions, privacy questions, data questions, compliance questions, regulatory questions
-        """
+        prompt_data, prompt_version = load_prompt_with_fallback("supervisor", user_id)
+        compiled_prompt = prompt_manager.compile_prompt(prompt_data, ticket)
         messages = [
-            SystemMessage(content=prompt),
+            SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
         return self.llm.invoke(messages)
@@ -67,17 +90,12 @@ class BillingAgent:
         self.llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.6)
     # Use the cheapest model for this agent
 
-    def handle(self, ticket: str) -> str : # Enhance the readability of the code by using the return type
+    def handle(self, ticket: str, user_id: str) -> str : # Enhance the readability of the code by using the return type
         """ Handle the Billing related ticket"""
-        prompt = """
-        You are a billing agent. 
-        You are responsible for handling the billing related tickets.
-        - Refunds, payments, invoices, billing issues, charges, subscriptions, billing questions, billing support, billing assistance, billing help, billing information, billing FAQ, billing support, billing assistance, billing help, billing information, billing FAQ, billing support, billing assistance, billing help, billing information, billing FAQ
-
-        Be helpful, professional, and concise
-        """
+        prompt_data, prompt_version = load_prompt_with_fallback("billing", user_id)
+        compiled_prompt = prompt_manager.compile_prompt(prompt_data, ticket)
         messages = [
-            SystemMessage(content=prompt),
+            SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
         return self.llm.invoke(messages).content
@@ -89,16 +107,12 @@ class TechnicalAgent:
     def __init__(self):
         self.llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.6)
 
-    def handle(self, ticket: str) -> str :
+    def handle(self, ticket: str, user_id: str) -> str :
         """ Handle the Technical related ticket"""
-        prompt = """
-        You are a technical agent. You are responsible for handling the technical related tickets.
-        - Payment Gateway issues,Bugs, errors, crashes, performance issues, security issues, technical questions, technical support, technical assistance, technical help, technical information, technical FAQ, technical support, technical assistance, technical help, technical information, technical FAQ, technical support, technical assistance, technical help, technical information, technical FAQ
-
-        Be helpful, technical, and concise
-        """
+        prompt_data, prompt_version = load_prompt_with_fallback("technical", user_id)
+        compiled_prompt = prompt_manager.compile_prompt(prompt_data, ticket)
         messages = [
-            SystemMessage(content=prompt),
+            SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
         return self.llm.invoke(messages).content
@@ -109,16 +123,12 @@ class GeneralAgent:
     def __init__(self):
         self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6)
 
-    def handle(self, ticket: str) -> str :
+    def handle(self, ticket: str,user_id: str) -> str :
         """ Handle the General related ticket"""
-        prompt = """
-        You are a general agent. You are responsible for handling the general related tickets.
-        - General questions, general support, general assistance, general help, general information, general FAQ
-
-        Be helpful and friendly
-        """
+        prompt_data, prompt_version = load_prompt_with_fallback("general", user_id)
+        compiled_prompt = prompt_manager.compile_prompt(prompt_data, ticket)
         messages = [
-            SystemMessage(content=prompt),
+            SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
         return self.llm.invoke(messages).content
@@ -129,16 +139,12 @@ class EscalateAgent:
     def __init__(self):
         self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6)
 
-    def handle(self, ticket: str) -> str :
+    def handle(self, ticket: str,user_id: str) -> str :
         """ Handle the Escalate related ticket"""
-        prompt = """
-        You are a escalate agent. You are responsible for escalating the ticket to the appropriate specialist.
-        - Legal issues, ethical issues, security issues, privacy issues, data issues, compliance issues, regulatory issues, legal questions, ethical questions, security questions, privacy questions, data questions, compliance questions, regulatory questions
-
-        Be helpful, escalate, and concise
-        """
+        prompt_data, prompt_version = load_prompt_with_fallback("escalate", user_id)
+        compiled_prompt = prompt_manager.compile_prompt(prompt_data, ticket)
         messages = [
-            SystemMessage(content=prompt),
+            SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
         return self.llm.invoke(messages).content
@@ -170,7 +176,7 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def supervisor_node(state: AgentState) -> AgentState:
         """ Supervisor Node """
         print("Supervisor Node: Analyzing the ticket")
-        routing = supervisor.route(state["ticket"])
+        routing = supervisor.route(state["ticket"],state["user_id"])
         # Update the state
         state["specialist"] = routing.specialist # This is not a recommended practice - we should use the return type to update the state
         state["routing_confidence"] = routing.confidence
@@ -193,7 +199,7 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def billing_node(state: AgentState) -> AgentState:
         """ Billing Node """
         print("Billing Node: Handling the ticket")
-        state["response"] = billing.handle(state["ticket"])
+        state["response"] = billing.handle(state["ticket"],state["user_id"])
         state["specialist_used"] = "billing"
         # Update the state
         state["iteration_count"] = state.get("iteration_count", 0) + 1
@@ -212,7 +218,7 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def technical_node(state: AgentState) -> AgentState:
         """ Technical Node """
         print("Technical Node: Handling the ticket")
-        state["response"] = technical.handle(state["ticket"])
+        state["response"] = technical.handle(state["ticket"],state["user_id"])
         state["specialist_used"] = "technical"
         # Update the state
         state["iteration_count"] = state.get("iteration_count", 0) + 1
@@ -231,7 +237,7 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def general_node(state: AgentState) -> AgentState:
         """ General Node """
         print("General Node: Handling the ticket")
-        state["response"] = general.handle(state["ticket"])
+        state["response"] = general.handle(state["ticket"],state["user_id"])
         state["specialist_used"] = "general"
         # Update the state
         state["iteration_count"] = state.get("iteration_count", 0) + 1
@@ -250,7 +256,7 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def escalate_node(state: AgentState) -> AgentState:
         """ Escalate Node """
         print("Escalate Node: Escalating the ticket")
-        state["response"] = escalate.handle(state["ticket"])
+        state["response"] = escalate.handle(state["ticket"],state["user_id"])
         state["specialist_used"] = "escalate"
         # Update the state
         state["iteration_count"] = state.get("iteration_count", 0) + 1
