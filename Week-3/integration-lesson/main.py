@@ -7,6 +7,7 @@ from typing import TypedDict, Literal, Optional
 from prompt_manager import PromptManager
 from ab_test_manager import ABTestManager
 from pathlib import Path
+from models import TicketRouting, SupportResponse
 load_dotenv()
 
 prompt_manager = PromptManager(prompts_dir=str(Path(__file__).parent / "prompts"))
@@ -50,12 +51,6 @@ class AgentState(TypedDict):
     error: Optional[str]
 
 
-class TicketRouting(BaseModel):
-    """ Simple Routing Decision """
-    specialist: Literal['billing', 'technical', 'general','escalate']
-    reasoning: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
 # Agents
 
 # Define each class for new agents - 
@@ -87,7 +82,7 @@ class BillingAgent:
     """ Billing Agent """
 
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.6)
+        self.llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.6).with_structured_output(SupportResponse)
     # Use the cheapest model for this agent
 
     def handle(self, ticket: str, user_id: str) -> str : # Enhance the readability of the code by using the return type
@@ -98,14 +93,14 @@ class BillingAgent:
             SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
-        return self.llm.invoke(messages).content
+        return self.llm.invoke(messages)
 
 
 class TechnicalAgent:
     """ Technical Agent """
 
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.6)
+        self.llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.6).with_structured_output(SupportResponse)
 
     def handle(self, ticket: str, user_id: str) -> str :
         """ Handle the Technical related ticket"""
@@ -115,13 +110,13 @@ class TechnicalAgent:
             SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
-        return self.llm.invoke(messages).content
+        return self.llm.invoke(messages)
 
 class GeneralAgent:
     """ General Agent """
 
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6)
+        self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6).with_structured_output(SupportResponse)
 
     def handle(self, ticket: str,user_id: str) -> str :
         """ Handle the General related ticket"""
@@ -131,13 +126,13 @@ class GeneralAgent:
             SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
-        return self.llm.invoke(messages).content
+        return self.llm.invoke(messages)
 
 class EscalateAgent:
     """ Escalate Agent """
 
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6)
+        self.llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.6).with_structured_output(SupportResponse)
 
     def handle(self, ticket: str,user_id: str) -> str :
         """ Handle the Escalate related ticket"""
@@ -147,7 +142,7 @@ class EscalateAgent:
             SystemMessage(content=compiled_prompt),
             HumanMessage(content=ticket)
         ]
-        return self.llm.invoke(messages).content
+        return self.llm.invoke(messages)
 
 # Steps to create the graph:
 # 1. Initialize the StateGraph
@@ -177,21 +172,20 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
         """ Supervisor Node """
         print("Supervisor Node: Analyzing the ticket")
         routing = supervisor.route(state["ticket"],state["user_id"])
-        # Update the state
-        state["specialist"] = routing.specialist # This is not a recommended practice - we should use the return type to update the state
-        state["routing_confidence"] = routing.confidence
-        state["routing_reasoning"] = routing.reasoning
-        state["iteration_count"] = state.get("iteration_count", 0) + 1
-        state["log_trace"] = state.get("log_trace", []) 
-        state["log_trace"].append({
-            "agent": "supervisor",
-            "action": "routing",
-            "specialist": routing.specialist,
-            "confidence": routing.confidence,
-            "reasoning": routing.reasoning
-        })
         print(f"Routed to {routing.specialist} with confidence {routing.confidence} and reasoning {routing.reasoning}")
-        return state
+        return {
+            "specialist": routing.specialist,
+            "routing_confidence": routing.confidence,
+            "routing_reasoning": routing.reasoning,
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "log_trace": state.get("log_trace", []) + [{
+                "agent": "supervisor",
+                "action": "routing",
+                "specialist": routing.specialist,
+                "confidence": routing.confidence,
+                "reasoning": routing.reasoning
+            }]
+        }
 
     workflow.add_node("supervisor", supervisor_node)
 
@@ -199,18 +193,18 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def billing_node(state: AgentState) -> AgentState:
         """ Billing Node """
         print("Billing Node: Handling the ticket")
-        state["response"] = billing.handle(state["ticket"],state["user_id"])
-        state["specialist_used"] = "billing"
-        # Update the state
-        state["iteration_count"] = state.get("iteration_count", 0) + 1
-        state["log_trace"] = state.get("log_trace", []) 
-        state["log_trace"].append({
-            "agent": "billing",
-            "action": "handling",
-            "response": state["response"]
-        })
-        print(f"Handled the ticket with response {state['response']}")
-        return state
+        response = billing.handle(state["ticket"],state["user_id"])
+        #print(f"Handled the ticket with response {state['response']}")
+        return {
+            "response": response.message,
+            "specialist_used": "billing",
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "log_trace": state.get("log_trace", []) + [{
+                "agent": "billing",
+                "action": "handling",
+                "response": response.message
+            }]
+        }
 
     workflow.add_node("billing", billing_node)
 
@@ -218,18 +212,17 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def technical_node(state: AgentState) -> AgentState:
         """ Technical Node """
         print("Technical Node: Handling the ticket")
-        state["response"] = technical.handle(state["ticket"],state["user_id"])
-        state["specialist_used"] = "technical"
-        # Update the state
-        state["iteration_count"] = state.get("iteration_count", 0) + 1
-        state["log_trace"] = state.get("log_trace", []) 
-        state["log_trace"].append({
-            "agent": "technical",
-            "action": "handling",
-            "response": state["response"]
-        })
-        print(f"Handled the ticket with response {state['response']}")
-        return state
+        response = technical.handle(state["ticket"],state["user_id"])
+        return {
+            "response": response.message,
+            "specialist_used": "technical",
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "log_trace": state.get("log_trace", []) + [{
+                "agent": "technical",
+                "action": "handling",
+                "response": response.message
+            }]
+        }
 
     workflow.add_node("technical", technical_node)
 
@@ -237,18 +230,17 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def general_node(state: AgentState) -> AgentState:
         """ General Node """
         print("General Node: Handling the ticket")
-        state["response"] = general.handle(state["ticket"],state["user_id"])
-        state["specialist_used"] = "general"
-        # Update the state
-        state["iteration_count"] = state.get("iteration_count", 0) + 1
-        state["log_trace"] = state.get("log_trace", []) 
-        state["log_trace"].append({
-            "agent": "general",
-            "action": "handling",
-            "response": state["response"]
-        })
-        print(f"Handled the ticket with response {state['response']}")
-        return state
+        response = general.handle(state["ticket"],state["user_id"])
+        return {
+            "response": response.message,
+            "specialist_used": "general",
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "log_trace": state.get("log_trace", []) + [{
+                "agent": "general",
+                "action": "handling",
+                "response": response.message
+            }]
+        }
 
     workflow.add_node("general", general_node)
 
@@ -256,18 +248,17 @@ def create_simple_graph(supervisor, billing, technical, general, escalate):
     def escalate_node(state: AgentState) -> AgentState:
         """ Escalate Node """
         print("Escalate Node: Escalating the ticket")
-        state["response"] = escalate.handle(state["ticket"],state["user_id"])
-        state["specialist_used"] = "escalate"
-        # Update the state
-        state["iteration_count"] = state.get("iteration_count", 0) + 1
-        state["log_trace"] = state.get("log_trace", []) 
-        state["log_trace"].append({
-            "agent": "escalate",
-            "action": "handling",
-            "response": state["response"]
-        })
-        print(f"Escalated the ticket with response {state['response']}")
-        return state
+        response = escalate.handle(state["ticket"],state["user_id"])
+        return {
+            "response": response.message,
+            "specialist_used": "escalate",
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "log_trace": state.get("log_trace", []) + [{
+                "agent": "escalate",
+                "action": "handling",
+                "response": response.message
+            }]
+        }
 
     workflow.add_node("escalate", escalate_node)
 
@@ -325,7 +316,7 @@ def main():
         }
         result = graph.invoke(initial_state)
         results.append(result)
-        print(f"Result: {result}")
+        # print(f"Result: {result}")
         print(f"Specialist used: {result['specialist_used']}")
         print(f"Response: {result['response']}")
         print(f"Routing confidence: {result['routing_confidence']}")
